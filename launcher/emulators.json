@@ -1,99 +1,68 @@
 {
   "emulators": [
     {
-      "id": "shadPS4",
+      "id": "shadps4",
       "name": "shadPS4",
-      "system": "PlayStation 4",
-      "dir": "emulators/shadPS4",
-      "extensions": ["elf", "bin", "eboot"],
-      "executables": ["shadps4", "shadPS4.exe", "shadPS4"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
+      "dir": "shadPS4",
+      "systems": ["ps4"],
+      "exe": ["shadPS4.exe", "shadps4.exe"],
+      "args": ["-g", "{game}"]
     },
     {
-      "id": "pcsx2",
-      "name": "PCSX2",
-      "system": "PlayStation 2",
-      "dir": "emulators/pcsx2",
-      "extensions": ["iso", "bin", "chd", "cso", "gz", "elf"],
-      "executables": ["pcsx2-qt", "pcsx2-qt.exe", "bin/pcsx2-qt"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
-    },
-    {
-      "id": "dolphin-wii",
-      "name": "Dolphin",
-      "system": "GameCube / Wii",
-      "dir": "emulators/dolphin-wii",
-      "extensions": ["iso", "gcm", "wbfs", "rvz", "gcz", "wad", "dol", "elf"],
-      "executables": ["Binaries/dolphin-emu", "Binaries/Dolphin.exe", "dolphin-emu"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
-    },
-    {
-      "id": "duckstation-ps1",
-      "name": "DuckStation",
-      "system": "PlayStation 1",
-      "dir": "emulators/duckstation-ps1",
-      "extensions": ["cue", "bin", "iso", "chd", "pbp", "exe", "m3u"],
-      "executables": ["bin/duckstation-qt", "duckstation-qt", "duckstation-qt-x64-ReleaseLTCG.exe"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
-    },
-    {
-      "id": "KytyPS5",
+      "id": "kyty",
       "name": "Kyty",
-      "system": "PlayStation 5",
-      "dir": "emulators/KytyPS5",
-      "extensions": ["elf", "self", "bin"],
-      "executables": ["fc_script", "kyty", "Kyty.exe", "fc_script.exe"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
+      "dir": "kyty",
+      "systems": ["ps5"],
+      "exe": ["kyty_emulator.exe"],
+      "args": ["{game}"]
     },
     {
       "id": "rpcs3",
       "name": "RPCS3",
-      "system": "PlayStation 3",
-      "dir": "emulators/rpcs3",
-      "extensions": ["iso", "elf", "self", "bin"],
-      "executables": ["bin/rpcs3", "rpcs3", "rpcs3.exe"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
+      "dir": "rpcs3",
+      "systems": ["ps3"],
+      "exe": ["rpcs3.exe"],
+      "args": ["{game}"]
     },
     {
-      "id": "suyu-v0.0.4-nintendo",
+      "id": "pcsx2",
+      "name": "PCSX2",
+      "dir": "pcsx2",
+      "systems": ["ps2"],
+      "exe": ["pcsx2-qt.exe"],
+      "args": ["-batch", "--", "{game}"]
+    },
+    {
+      "id": "duckstation",
+      "name": "DuckStation",
+      "dir": "duckstation",
+      "systems": ["ps1"],
+      "exe": ["duckstation-qt-x64-ReleaseLTCG.exe", "duckstation-qt.exe"],
+      "args": ["-batch", "--", "{game}"]
+    },
+    {
+      "id": "dolphin",
+      "name": "Dolphin",
+      "dir": "dolphin",
+      "systems": ["gamecube", "wii"],
+      "exe": ["Dolphin.exe"],
+      "args": ["-b", "-e", "{game}"]
+    },
+    {
+      "id": "suyu",
       "name": "Suyu",
-      "system": "Nintendo Switch",
-      "dir": "emulators/suyu-v0.0.4-nintendo",
-      "extensions": ["nsp", "xci", "nro", "nso", "nca"],
-      "executables": ["bin/suyu", "suyu", "suyu.exe"],
-      "build": [
-        ["cmake", "-S", "{src}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release"],
-        ["cmake", "--build", "{build}", "--parallel"]
-      ]
+      "dir": "suyu",
+      "systems": ["switch"],
+      "exe": ["suyu.exe"],
+      "args": ["-f", "-g", "{game}"]
     },
     {
-      "id": "xenia-xbox",
+      "id": "xenia",
       "name": "Xenia",
-      "system": "Xbox 360",
-      "dir": "emulators/xenia-xbox",
-      "extensions": ["iso", "xex", "xcp", "god"],
-      "executables": ["build/bin/Linux/Release/xenia", "xenia.exe", "xenia"],
-      "build": [
-        ["python3", "{src}/xb", "build", "--config=release"]
-      ]
+      "dir": "xenia",
+      "systems": ["xbox360"],
+      "exe": ["xenia.exe"],
+      "args": ["{game}"]
     }
   ]
 }

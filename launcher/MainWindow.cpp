@@ -1,258 +1,349 @@
 #include "MainWindow.h"
 
+#include <QAction>
+#include <QApplication>
+#include <QComboBox>
+#include <QDesktopServices>
 #include <QDir>
-#include <QDirIterator>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QListWidget>
+#include <QHeaderView>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
-#include <QPlainTextEdit>
-#include <QPushButton>
-#include <QSplitter>
-#include <QVBoxLayout>
+#include <QMimeData>
+#include <QStatusBar>
+#include <QToolBar>
+#include <QTreeWidget>
+#include <QUrl>
+
+namespace {
+enum Column { ColTitle, ColSystem, ColEmulator, ColPath };
+constexpr int IndexRole = Qt::UserRole;
+
+const System kAllSystems[] = {System::PS1, System::PS2, System::PS3, System::PS4, System::PS5,
+                              System::GameCube, System::Wii, System::Switch, System::Xbox360};
+} // namespace
+
+QString MainWindow::systemLabel(const QString &id)
+{
+    for (System s : kAllSystems)
+        if (id == QLatin1String(systemId(s)))
+            return QString::fromLatin1(systemName(s));
+    return tr("Unknown");
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
-    , m_emulators(EmulatorRegistry::load())
 {
     setWindowTitle(tr("Emu Launcher"));
-    resize(1100, 700);
+    resize(1000, 640);
+    setAcceptDrops(true);
 
-    m_emulatorList = new QListWidget;
-    m_emulatorList->setMinimumWidth(240);
-    m_gameList = new QListWidget;
-    m_status = new QLabel;
-    m_status->setWordWrap(true);
-    m_log = new QPlainTextEdit;
-    m_log->setReadOnly(true);
-    m_log->setMaximumBlockCount(5000);
+    m_search = new QLineEdit;
+    m_search->setPlaceholderText(tr("Search games..."));
+    m_search->setClearButtonEnabled(true);
+    m_systemFilter = new QComboBox;
+    m_systemFilter->addItem(tr("All systems"), QString());
+    for (System s : kAllSystems)
+        m_systemFilter->addItem(QString::fromLatin1(systemName(s)), QString::fromLatin1(systemId(s)));
 
-    m_buildBtn = new QPushButton(tr("Build"));
-    m_exeBtn = new QPushButton(tr("Set executable..."));
-    m_romBtn = new QPushButton(tr("Set game folder..."));
-    m_launchEmuBtn = new QPushButton(tr("Launch emulator"));
-    m_launchGameBtn = new QPushButton(tr("Launch selected game"));
+    auto *addFiles = new QAction(tr("Add games..."), this);
+    auto *addFolder = new QAction(tr("Add folder..."), this);
+    auto *status = new QAction(tr("Emulator status"), this);
+    auto *quit = new QAction(tr("Exit"), this);
 
-    auto *buttons = new QHBoxLayout;
-    for (auto *b : {m_buildBtn, m_exeBtn, m_romBtn, m_launchEmuBtn, m_launchGameBtn})
-        buttons->addWidget(b);
+    auto *file = menuBar()->addMenu(tr("&File"));
+    file->addAction(addFiles);
+    file->addAction(addFolder);
+    file->addSeparator();
+    file->addAction(quit);
+    menuBar()->addMenu(tr("&Help"))->addAction(status);
 
-    auto *right = new QWidget;
-    auto *rightLayout = new QVBoxLayout(right);
-    rightLayout->addWidget(m_status);
-    rightLayout->addLayout(buttons);
-    rightLayout->addWidget(new QLabel(tr("Games")));
-    rightLayout->addWidget(m_gameList, 3);
-    rightLayout->addWidget(new QLabel(tr("Log")));
-    rightLayout->addWidget(m_log, 2);
+    auto *bar = addToolBar(tr("Library"));
+    bar->setMovable(false);
+    bar->addAction(addFiles);
+    bar->addAction(addFolder);
+    bar->addSeparator();
+    bar->addWidget(m_systemFilter);
+    bar->addWidget(m_search);
 
-    auto *split = new QSplitter;
-    split->addWidget(m_emulatorList);
-    split->addWidget(right);
-    split->setStretchFactor(1, 1);
-    setCentralWidget(split);
+    m_tree = new QTreeWidget;
+    m_tree->setColumnCount(4);
+    m_tree->setHeaderLabels({tr("Title"), tr("System"), tr("Emulator"), tr("Path")});
+    m_tree->setRootIsDecorated(false);
+    m_tree->setAlternatingRowColors(true);
+    m_tree->setSortingEnabled(true);
+    m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_tree->header()->setSectionResizeMode(ColTitle, QHeaderView::Stretch);
+    m_tree->header()->setSectionResizeMode(ColPath, QHeaderView::Interactive);
+    m_tree->setColumnWidth(ColSystem, 130);
+    m_tree->setColumnWidth(ColEmulator, 120);
+    m_tree->setColumnWidth(ColPath, 260);
+    setCentralWidget(m_tree);
 
-    connect(m_emulatorList, &QListWidget::currentRowChanged, this, &MainWindow::onEmulatorChanged);
-    connect(m_buildBtn, &QPushButton::clicked, this, &MainWindow::onBuild);
-    connect(m_exeBtn, &QPushButton::clicked, this, &MainWindow::onSetExecutable);
-    connect(m_romBtn, &QPushButton::clicked, this, &MainWindow::onSetRomFolder);
-    connect(m_launchEmuBtn, &QPushButton::clicked, this, &MainWindow::onLaunchEmulator);
-    connect(m_launchGameBtn, &QPushButton::clicked, this, &MainWindow::onLaunchGame);
-    connect(m_gameList, &QListWidget::itemDoubleClicked, this, [this] { onLaunchGame(); });
+    connect(addFiles, &QAction::triggered, this, &MainWindow::onAddFiles);
+    connect(addFolder, &QAction::triggered, this, &MainWindow::onAddFolder);
+    connect(status, &QAction::triggered, this, &MainWindow::showEmulatorStatus);
+    connect(quit, &QAction::triggered, this, &QWidget::close);
+    connect(m_search, &QLineEdit::textChanged, this, [this] { refresh(); });
+    connect(m_systemFilter, &QComboBox::currentIndexChanged, this, [this] { refresh(); });
+    connect(m_tree, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item) {
+        launchIndex(item->data(ColTitle, IndexRole).toInt());
+    });
+    connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &MainWindow::onContextMenu);
 
-    refreshEmulatorList();
-    if (m_emulatorList->count() > 0)
-        m_emulatorList->setCurrentRow(0);
+    refresh();
 }
 
-const EmulatorInfo *MainWindow::currentEmulator() const
+// ---------------------------------------------------------------- adding games
+
+void MainWindow::onAddFiles()
 {
-    const int row = m_emulatorList->currentRow();
-    return (row >= 0 && row < m_emulators.size()) ? &m_emulators[row] : nullptr;
+    const QStringList files = QFileDialog::getOpenFileNames(
+        this, tr("Add games"), QString(),
+        tr("Games (*.iso *.bin *.cue *.chd *.cso *.zso *.gz *.img *.rvz *.wbfs *.gcz *.gcm *.wad *.dol "
+           "*.nsp *.xci *.nro *.xex *.pbp *.m3u *.self *.exe);;All files (*)"));
+    if (!files.isEmpty())
+        addPaths(files);
 }
 
-void MainWindow::refreshEmulatorList()
+void MainWindow::onAddFolder()
 {
-    const int keep = m_emulatorList->currentRow();
-    m_emulatorList->blockSignals(true);
-    m_emulatorList->clear();
-    for (const auto &e : m_emulators) {
-        const bool ready = !EmulatorRegistry::findExecutable(e).isEmpty();
-        m_emulatorList->addItem(QStringLiteral("%1 %2\n    %3")
-                                    .arg(ready ? QStringLiteral("●") : QStringLiteral("○"),
-                                         e.name, e.system));
-    }
-    m_emulatorList->blockSignals(false);
-    m_emulatorList->setCurrentRow(keep >= 0 ? keep : 0);
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Add a game folder or a folder full of games"));
+    if (!dir.isEmpty())
+        addPaths({dir});
 }
 
-void MainWindow::onEmulatorChanged()
+void MainWindow::addPaths(const QStringList &paths)
 {
-    refreshButtons();
-    refreshGames();
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    int added = 0;
+    for (const QString &p : paths)
+        scanPath(QDir::cleanPath(p), 0, true, added);
+    QApplication::restoreOverrideCursor();
+
+    m_library.save();
+    refresh();
+    statusBar()->showMessage(added > 0 ? tr("Added %n game(s).", nullptr, added) : tr("No new games found."), 5000);
 }
 
-void MainWindow::refreshButtons()
+// A folder that is itself a game (PS3/PS4/PS5 dump) is added as one entry;
+// any other folder is searched recursively.
+void MainWindow::scanPath(const QString &path, int depth, bool explicitAdd, int &added)
 {
-    const auto *e = currentEmulator();
-    const bool building = m_buildProcess != nullptr;
-    if (!e) {
-        m_status->clear();
-        return;
-    }
-    const QString exe = EmulatorRegistry::findExecutable(*e);
-    const QString roms = EmulatorRegistry::romFolder(e->id);
-    m_status->setText(tr("<b>%1</b> (%2)<br>Source: %3<br>Executable: %4<br>Game folder: %5")
-                          .arg(e->name, e->system,
-                               EmulatorRegistry::isSourceCheckedOut(*e) ? tr("checked out") : tr("not downloaded yet"),
-                               exe.isEmpty() ? tr("not built") : exe,
-                               roms.isEmpty() ? tr("not set") : roms));
-    m_buildBtn->setEnabled(!building);
-    m_launchEmuBtn->setEnabled(!exe.isEmpty());
-    m_launchGameBtn->setEnabled(!exe.isEmpty());
-}
-
-void MainWindow::refreshGames()
-{
-    m_gameList->clear();
-    const auto *e = currentEmulator();
-    if (!e)
-        return;
-    const QString folder = EmulatorRegistry::romFolder(e->id);
-    if (folder.isEmpty() || !QDir(folder).exists())
-        return;
-
-    QDirIterator it(folder, QDir::Files, QDirIterator::Subdirectories);
-    QStringList files;
-    while (it.hasNext()) {
-        const QString path = it.next();
-        if (e->extensions.contains(QFileInfo(path).suffix().toLower()))
-            files << path;
-    }
-    files.sort(Qt::CaseInsensitive);
-    for (const QString &path : files) {
-        auto *item = new QListWidgetItem(QFileInfo(path).completeBaseName());
-        item->setData(Qt::UserRole, path);
-        item->setToolTip(path);
-        m_gameList->addItem(item);
-    }
-}
-
-void MainWindow::onBuild()
-{
-    const auto *e = currentEmulator();
-    if (!e || m_buildProcess)
-        return;
-
-    m_buildingId = e->id;
-    m_pendingSteps.clear();
-    // Fetch the submodule on demand: the launcher repo itself stays small.
-    m_pendingSteps.append({"git", "-C", EmulatorRegistry::projectRoot(), "submodule", "update",
-                           "--init", "--recursive", "--depth", "1", e->dir});
-    for (QStringList step : e->buildSteps) {
-        for (QString &arg : step) {
-            arg.replace("{src}", EmulatorRegistry::sourceDir(*e));
-            arg.replace("{build}", EmulatorRegistry::buildDir(*e));
+    const QFileInfo fi(path);
+    if (fi.isDir()) {
+        const Detection d = detectGame(path.toStdString());
+        if (!d.candidates.empty()) {
+            if (addGame(path, d))
+                ++added;
+            return;
         }
-        m_pendingSteps.append(step);
-    }
-    QDir().mkpath(EmulatorRegistry::buildDir(*e));
-
-    m_buildProcess = new QProcess(this);
-    m_buildProcess->setProcessChannelMode(QProcess::MergedChannels);
-    connect(m_buildProcess, &QProcess::readyRead, this, &MainWindow::onProcessOutput);
-    connect(m_buildProcess, &QProcess::finished, this, &MainWindow::onBuildStepFinished);
-    appendLog(tr("=== Building %1 ===").arg(e->name));
-    refreshButtons();
-    runNextBuildStep();
-}
-
-void MainWindow::runNextBuildStep()
-{
-    if (m_pendingSteps.isEmpty()) {
-        appendLog(tr("=== Build finished ==="));
-        m_buildProcess->deleteLater();
-        m_buildProcess = nullptr;
-        refreshEmulatorList();
+        if (depth > 8)
+            return;
+        const auto children = QDir(path).entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QFileInfo &c : children)
+            scanPath(c.absoluteFilePath(), depth + 1, false, added);
         return;
     }
-    const QStringList step = m_pendingSteps.takeFirst();
-    appendLog("$ " + step.join(' '));
-    m_buildProcess->start(step.first(), step.mid(1));
+    if (!fi.isFile())
+        return;
+    // While scanning, ignore files that can't be games; a file picked by hand is always added.
+    if (!explicitAdd && !isKnownGameExtension(path.toStdString()))
+        return;
+    const Detection d = detectGame(path.toStdString());
+    // While scanning, skip things we couldn't identify (random .bin / .exe files etc.).
+    if (!explicitAdd && d.candidates.empty())
+        return;
+    if (addGame(path, d))
+        ++added;
 }
 
-void MainWindow::onBuildStepFinished(int exitCode, QProcess::ExitStatus status)
+bool MainWindow::addGame(const QString &path, const Detection &d)
 {
-    if (status != QProcess::NormalExit || exitCode != 0) {
-        appendLog(tr("=== Build failed (exit code %1) ===").arg(exitCode));
-        m_pendingSteps.clear();
-        m_buildProcess->deleteLater();
-        m_buildProcess = nullptr;
-        refreshButtons();
+    if (m_library.contains(path))
+        return false;
+
+    GameEntry g;
+    g.path = path;
+    g.launchPath = d.launchPath.empty() ? path : QString::fromStdString(d.launchPath);
+    g.title = QString::fromStdString(d.title);
+    if (g.title.isEmpty())
+        g.title = QFileInfo(path).completeBaseName();
+    if (!d.candidates.empty())
+        g.system = QString::fromLatin1(systemId(d.candidates.front()));
+
+    // Assign automatically only when there is exactly one possible emulator.
+    const auto emus = m_registry.forDetection(d);
+    if (emus.size() == 1)
+        g.emulatorId = emus.front()->id;
+
+    m_library.add(g);
+    return true;
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *e)
+{
+    if (e->mimeData()->hasUrls())
+        e->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent *e)
+{
+    QStringList paths;
+    for (const QUrl &u : e->mimeData()->urls())
+        if (u.isLocalFile())
+            paths << u.toLocalFile();
+    if (!paths.isEmpty())
+        addPaths(paths);
+}
+
+// ---------------------------------------------------------------- library view
+
+void MainWindow::refresh()
+{
+    const QString needle = m_search->text().trimmed();
+    const QString sys = m_systemFilter->currentData().toString();
+
+    m_tree->setSortingEnabled(false);
+    m_tree->clear();
+    const auto &games = m_library.games();
+    for (int i = 0; i < games.size(); ++i) {
+        const GameEntry &g = games[i];
+        if (!sys.isEmpty() && g.system != sys)
+            continue;
+        if (!needle.isEmpty() && !g.title.contains(needle, Qt::CaseInsensitive)
+            && !g.path.contains(needle, Qt::CaseInsensitive))
+            continue;
+
+        const Emulator *emu = m_registry.byId(g.emulatorId);
+        QString emuText = tr("(pick on launch)");
+        if (emu)
+            emuText = emu->available() ? emu->name : tr("%1 (not included)").arg(emu->name);
+
+        auto *item = new QTreeWidgetItem({g.title, g.system.isEmpty() ? tr("Unknown") : systemLabel(g.system),
+                                          emuText, QDir::toNativeSeparators(g.path)});
+        item->setData(ColTitle, IndexRole, i);
+        item->setToolTip(ColPath, g.path);
+        m_tree->addTopLevelItem(item);
+    }
+    m_tree->setSortingEnabled(true);
+    m_tree->sortByColumn(ColTitle, Qt::AscendingOrder);
+
+    int available = 0;
+    for (const auto &e : m_registry.all())
+        available += e.available() ? 1 : 0;
+    statusBar()->showMessage(tr("%1 games in library • %2 of %3 emulators included. Drop games here to add them.")
+                                 .arg(games.size()).arg(available).arg(m_registry.all().size()));
+}
+
+int MainWindow::selectedIndex() const
+{
+    const auto *item = m_tree->currentItem();
+    return item ? item->data(ColTitle, IndexRole).toInt() : -1;
+}
+
+void MainWindow::onContextMenu(const QPoint &pos)
+{
+    const auto *item = m_tree->itemAt(pos);
+    if (!item)
+        return;
+    const int index = item->data(ColTitle, IndexRole).toInt();
+    if (index < 0 || index >= m_library.games().size())
+        return;
+
+    QMenu menu(this);
+    menu.addAction(tr("Launch"), this, [this, index] { launchIndex(index); });
+
+    auto *with = menu.addMenu(tr("Open with"));
+    for (const Emulator &e : m_registry.all()) {
+        const QString id = e.id;
+        auto *a = with->addAction(e.available() ? e.name : tr("%1 (not included)").arg(e.name));
+        a->setEnabled(e.available());
+        connect(a, &QAction::triggered, this, [this, index, id] {
+            m_library.games()[index].emulatorId = id;
+            m_library.save();
+            launchIndex(index);
+            refresh();
+        });
+    }
+
+    menu.addAction(tr("Show in folder"), this, [this, index] {
+        const QFileInfo fi(m_library.games()[index].path);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(fi.isDir() ? fi.absoluteFilePath() : fi.absolutePath()));
+    });
+    menu.addSeparator();
+    menu.addAction(tr("Remove from library"), this, [this, index] {
+        m_library.removeAt(index);
+        m_library.save();
+        refresh();
+    });
+    menu.exec(m_tree->viewport()->mapToGlobal(pos));
+}
+
+// ---------------------------------------------------------------- launching
+
+const Emulator *MainWindow::chooseEmulator(const GameEntry &g)
+{
+    // Prefer emulators that fit what the file looks like; otherwise offer all of them.
+    QVector<const Emulator *> options = m_registry.forDetection(detectGame(g.path.toStdString()));
+    if (options.isEmpty())
+        for (const Emulator &e : m_registry.all())
+            options.append(&e);
+
+    QStringList names;
+    for (const Emulator *e : options)
+        names << (e->available() ? e->name : tr("%1 (not included)").arg(e->name));
+
+    bool ok = false;
+    const QString picked = QInputDialog::getItem(this, tr("Choose emulator"),
+                                                 tr("Which emulator should run \"%1\"?").arg(g.title), names, 0, false, &ok);
+    return ok ? options.value(names.indexOf(picked)) : nullptr;
+}
+
+void MainWindow::launchIndex(int index)
+{
+    if (index < 0 || index >= m_library.games().size())
+        return;
+    GameEntry &g = m_library.games()[index];
+
+    if (!QFileInfo::exists(g.path)) {
+        QMessageBox::warning(this, tr("Game not found"), tr("This file no longer exists:\n%1").arg(g.path));
         return;
     }
-    runNextBuildStep();
+
+    const Emulator *emu = m_registry.byId(g.emulatorId);
+    if (!emu) {
+        emu = chooseEmulator(g);
+        if (!emu)
+            return;
+        g.emulatorId = emu->id; // remembered for next time
+        m_library.save();
+        refresh();
+    }
+
+    const QString err = EmulatorRegistry::launch(*emu, g.launchPath.isEmpty() ? g.path : g.launchPath);
+    if (!err.isEmpty())
+        QMessageBox::warning(this, tr("Cannot launch"), err);
+    else
+        statusBar()->showMessage(tr("Started %1 with %2").arg(g.title, emu->name), 5000);
 }
 
-void MainWindow::onProcessOutput()
+void MainWindow::showEmulatorStatus()
 {
-    if (m_buildProcess)
-        appendLog(QString::fromLocal8Bit(m_buildProcess->readAll()).trimmed());
-}
-
-void MainWindow::onSetExecutable()
-{
-    const auto *e = currentEmulator();
-    if (!e)
-        return;
-    const QString path = QFileDialog::getOpenFileName(this, tr("Select %1 executable").arg(e->name));
-    if (path.isEmpty())
-        return;
-    EmulatorRegistry::setUserExecutable(e->id, path);
-    refreshEmulatorList();
-}
-
-void MainWindow::onSetRomFolder()
-{
-    const auto *e = currentEmulator();
-    if (!e)
-        return;
-    const QString dir = QFileDialog::getExistingDirectory(this, tr("Game folder for %1").arg(e->name));
-    if (dir.isEmpty())
-        return;
-    EmulatorRegistry::setRomFolder(e->id, dir);
-    refreshButtons();
-    refreshGames();
-}
-
-void MainWindow::onLaunchEmulator()
-{
-    if (const auto *e = currentEmulator())
-        launch(EmulatorRegistry::findExecutable(*e), {});
-}
-
-void MainWindow::onLaunchGame()
-{
-    const auto *e = currentEmulator();
-    auto *item = m_gameList->currentItem();
-    if (!e || !item)
-        return;
-    launch(EmulatorRegistry::findExecutable(*e), {item->data(Qt::UserRole).toString()});
-}
-
-void MainWindow::launch(const QString &exe, const QStringList &args)
-{
-    if (exe.isEmpty())
-        return;
-    appendLog("$ " + exe + ' ' + args.join(' '));
-    if (!QProcess::startDetached(exe, args, QFileInfo(exe).absolutePath()))
-        QMessageBox::warning(this, tr("Launch failed"), tr("Could not start %1").arg(exe));
-}
-
-void MainWindow::appendLog(const QString &text)
-{
-    if (!text.isEmpty())
-        m_log->appendPlainText(text);
+    QString text;
+    for (const Emulator &e : m_registry.all()) {
+        QStringList systems;
+        for (const QString &s : e.systems)
+            systems << systemLabel(s);
+        text += QStringLiteral("%1  %2  (%3)\n")
+                    .arg(e.available() ? QStringLiteral("✔") : QStringLiteral("✘"), e.name, systems.join(", "));
+    }
+    text += tr("\nSearched in:\n%1").arg(QDir::toNativeSeparators(EmulatorRegistry::emulatorsRoot()));
+    QMessageBox::information(this, tr("Emulator status"), text);
 }

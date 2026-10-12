@@ -1,34 +1,39 @@
 #pragma once
 
+#include "Detector.h"
+
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
-struct EmulatorInfo {
+struct Emulator {
     QString id;
     QString name;
-    QString system;
-    QString dir;                     // submodule path, relative to project root
-    QStringList extensions;          // ROM/ISO extensions this emulator accepts
-    QStringList executables;         // candidate executable paths inside the build dir
-    QVector<QStringList> buildSteps; // commands; {src} and {build} are substituted
+    QString dir;            // folder under <app>/emulators/
+    QStringList systems;    // system ids this emulator runs (see systemId())
+    QStringList exeNames;   // executable file names to look for, in order of preference
+    QStringList args;       // command line; "{game}" is replaced by the game path
+    QString exePath;        // resolved at load time, empty if the emulator isn't bundled
+
+    bool available() const { return !exePath.isEmpty(); }
 };
 
 class EmulatorRegistry {
 public:
-    // Loads the bundled emulators.json resource.
-    static QVector<EmulatorInfo> load();
+    EmulatorRegistry();
 
-    static QString projectRoot();
-    static QString sourceDir(const EmulatorInfo &e);
-    static QString buildDir(const EmulatorInfo &e);
+    const QVector<Emulator> &all() const { return m_emulators; }
+    const Emulator *byId(const QString &id) const;
 
-    // User override (QSettings) first, then well-known locations in the build dir.
-    static QString findExecutable(const EmulatorInfo &e);
-    static bool isSourceCheckedOut(const EmulatorInfo &e);
+    // Emulators able to run any of the detected systems, best match first, no duplicates.
+    QVector<const Emulator *> forDetection(const Detection &d) const;
 
-    static QString userExecutable(const QString &id);
-    static void setUserExecutable(const QString &id, const QString &path);
-    static QString romFolder(const QString &id);
-    static void setRomFolder(const QString &id, const QString &path);
+    // Folder the emulators are bundled in (<app>/emulators).
+    static QString emulatorsRoot();
+
+    // Starts `emu` with the given game. Returns an error message, or an empty string on success.
+    static QString launch(const Emulator &emu, const QString &gamePath);
+
+private:
+    QVector<Emulator> m_emulators;
 };

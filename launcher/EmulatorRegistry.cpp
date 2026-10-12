@@ -2,14 +2,15 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QSettings>
+#include <QProcess>
 
-static QStringList toStringList(const QJsonArray &a)
+static QStringList toList(const QJsonArray &a)
 {
     QStringList out;
     for (const auto &v : a)
@@ -17,88 +18,76 @@ static QStringList toStringList(const QJsonArray &a)
     return out;
 }
 
-QVector<EmulatorInfo> EmulatorRegistry::load()
+// Looks for one of `names` anywhere below `dir` (builds put the exe in different subfolders).
+static QString findExe(const QString &dir, const QStringList &names)
 {
-    QVector<EmulatorInfo> result;
-    QFile f(QStringLiteral(":/emulators.json"));
-    if (!f.open(QIODevice::ReadOnly))
-        return result;
-
-    const auto doc = QJsonDocument::fromJson(f.readAll());
-    for (const auto &item : doc.object().value("emulators").toArray()) {
-        const auto o = item.toObject();
-        EmulatorInfo e;
-        e.id = o.value("id").toString();
-        e.name = o.value("name").toString();
-        e.system = o.value("system").toString();
-        e.dir = o.value("dir").toString();
-        e.extensions = toStringList(o.value("extensions").toArray());
-        e.executables = toStringList(o.value("executables").toArray());
-        for (const auto &step : o.value("build").toArray())
-            e.buildSteps.append(toStringList(step.toArray()));
-        result.append(e);
-    }
-    return result;
-}
-
-QString EmulatorRegistry::projectRoot()
-{
-    // Prefer the checkout the launcher was built from; fall back to the app dir.
-    const QString compiled = QStringLiteral(EMU_LAUNCHER_ROOT);
-    if (QFileInfo::exists(compiled + "/.gitmodules"))
-        return compiled;
-    return QCoreApplication::applicationDirPath();
-}
-
-QString EmulatorRegistry::sourceDir(const EmulatorInfo &e)
-{
-    return QDir(projectRoot()).filePath(e.dir);
-}
-
-QString EmulatorRegistry::buildDir(const EmulatorInfo &e)
-{
-    return QDir(projectRoot()).filePath("build-emulators/" + e.id);
-}
-
-bool EmulatorRegistry::isSourceCheckedOut(const EmulatorInfo &e)
-{
-    return QFileInfo::exists(sourceDir(e) + "/.git")
-        || !QDir(sourceDir(e)).isEmpty();
-}
-
-QString EmulatorRegistry::findExecutable(const EmulatorInfo &e)
-{
-    const QString user = userExecutable(e.id);
-    if (!user.isEmpty() && QFileInfo::exists(user))
-        return user;
-
-    for (const QString &rel : e.executables) {
-        for (const QString &base : {buildDir(e), sourceDir(e)}) {
-            const QString p = QDir(base).filePath(rel);
-            const QFileInfo fi(p);
-            if (fi.exists() && fi.isFile())
-                return fi.absoluteFilePath();
-        }
+    if (!QDir(dir).exists())
+        return {};
+    for (const QString &name : names) {
+        QDirIterator it(dir, {name}, QDir::Files, QDirIterator::Subdirectories);
+        if (it.hasNext())
+            return QFileInfo(it.next()).absoluteFilePath();
     }
     return {};
 }
 
-QString EmulatorRegistry::userExecutable(const QString &id)
+QString EmulatorRegistry::emulatorsRoot()
 {
-    return QSettings().value("emulators/" + id + "/exe").toString();
+    return QDir(QCoreApplication::applicationDirPath()).filePath("emulators");
 }
 
-void EmulatorRegistry::setUserExecutable(const QString &id, const QString &path)
+EmulatorRegistry::EmulatorRegistry()
 {
-    QSettings().setValue("emulators/" + id + "/exe", path);
+    QFile f(QStringLiteral(":/emulators.json"));
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+    const auto doc = QJsonDocument::fromJson(f.readAll());
+    for (const auto &item : doc.object().value("emulators").toArray()) {
+        const auto o = item.toObject();
+        Emulator e;
+        e.id = o.value("id").toString();
+        e.name = o.value("name").toString();
+        e.dir = o.value("dir").toString();
+        e.systems = toList(o.value("systems").toArray());
+        e.exeNames = toList(o.value("exe").toArray());
+        e.args = toList(o.value("args").toArray());
+        e.exePath = findExe(QDir(emulatorsRoot()).filePath(e.dir), e.exeNames);
+        m_emulators.append(e);
+    }
 }
 
-QString EmulatorRegistry::romFolder(const QString &id)
+const Emulator *EmulatorRegistry::byId(const QString &id) const
 {
-    return QSettings().value("emulators/" + id + "/roms").toString();
+    for (const auto &e : m_emulators)
+        if (e.id == id)
+            return &e;
+    return nullptr;
 }
 
-void EmulatorRegistry::setRomFolder(const QString &id, const QString &path)
+QVector<const Emulator *> EmulatorRegistry::forDetection(const Detection &d) const
 {
-    QSettings().setValue("emulators/" + id + "/roms", path);
+    QVector<const Emulator *> out;
+    for (System s : d.candidates) {
+        for (const auto &e : m_emulators) {
+            if (e.systems.contains(QString::fromLatin1(systemId(s))) && !out.contains(&e))
+                out.append(&e);
+        }
+    }
+    return out;
+}
+
+QString EmulatorRegistry::launch(const Emulator &emu, const QString &gamePath)
+{
+    if (!emu.available())
+        return QObject::tr("%1 is not included in this build of the launcher.").arg(emu.name);
+
+    QStringList args;
+    for (QString a : emu.args) {
+        a.replace("{game}", QDir::toNativeSeparators(gamePath));
+        args << a;
+    }
+    // Run from the emulator's own folder so it finds its data files.
+    if (!QProcess::startDetached(emu.exePath, args, QFileInfo(emu.exePath).absolutePath()))
+        return QObject::tr("Could not start %1.").arg(emu.name);
+    return {};
 }

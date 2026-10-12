@@ -1,39 +1,476 @@
-name: Build launcher (Windows)
+name: Build everything (Windows)
+
+# Builds the launcher and all 8 emulators, then packs them into ONE folder:
+#
+#   EmuLauncher/
+#     emu-launcher.exe (+ Qt DLLs)
+#     emulators/<name>/<emulator files>
+#
+# Every emulator is its own job so one failing build doesn't stop the rest; the final
+# job packs whatever succeeded and lists what is missing in BUILD-REPORT.txt.
 
 on:
   push:
     branches: [main]
-  pull_request:
+    paths-ignore: ["**.md"]
   workflow_dispatch:
 
+permissions:
+  contents: write # only used to attach the package to a release on tags
+
+env:
+  # Fetch only the emulator a job needs from the submodules.
+  GIT_TERMINAL_PROMPT: "0"
+
 jobs:
-  build:
+  # ------------------------------------------------------------------ launcher
+  launcher:
     runs-on: windows-2022
     steps:
-      # No submodules: the launcher itself doesn't need the emulator sources.
       - uses: actions/checkout@v4
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+      - uses: jurplel/install-qt-action@v4
         with:
           version: 6.7.*
           arch: win64_msvc2019_64
           cache: true
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: Run detector tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
       - name: Package
         shell: bash
         run: |
-          mkdir -p dist
-          cp build/Release/emu-launcher.exe dist/
-          windeployqt --release dist/emu-launcher.exe
+          mkdir -p out
+          cp build/Release/emu-launcher.exe out/
+          windeployqt --release --no-translations out/emu-launcher.exe
 
       - uses: actions/upload-artifact@v4
         with:
-          name: emu-launcher-windows
-          path: dist/
+          name: launcher
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ shadPS4 (PS4)
+  shadps4:
+    runs-on: windows-2025-vs2026
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source
+        run: git submodule update --init --recursive --depth 1 emulators/shadPS4
+      - uses: egor-tensin/vs-shell@v2
+        with:
+          arch: x64
+      - name: Configure
+        run: >
+          cmake -G Ninja -S emulators/shadPS4 -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON
+          -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p out
+          cp build/shadPS4.exe out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-shadPS4
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Kyty (PS5)
+  kyty:
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source
+        run: git submodule update --init --recursive --depth 1 emulators/KytyPS5
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install glslang
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Split-Path (Get-Command vcpkg).Source
+          vcpkg install glslang[tools,opt]:x64-windows
+          "$vcpkgRoot\installed\x64-windows\tools\glslang" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.10.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Configure
+        shell: cmd
+        run: >
+          cmake -S emulators/KytyPS5 -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DKYTY_BUILD_ORIGIN=Fork
+          -DKYTY_BUILD_REPOSITORY=${{ github.repository }}
+          -DKYTY_RELEASE_TAG=emu-launcher
+          -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
+      - name: Build
+        shell: cmd
+        run: cmake --build build --target launcher --parallel
+      - name: Install
+        shell: cmd
+        run: cmake --install build --prefix out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-kyty
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ RPCS3 (PS3)
+  rpcs3:
+    runs-on: windows-2025-vs2026
+    continue-on-error: true
+    timeout-minutes: 240
+    env:
+      COMPILER: msvc
+      QT_VER_MAIN: "6"
+      QT_VER: "6.12.0"
+      QT_VER_MSVC: msvc2022
+      QT_DATE: "202609280346"
+      LLVM_VER: "22.1.8"
+      VULKAN_VER: "1.4.341.1"
+      VULKAN_SDK_SHA: bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe
+      CCACHE_SHA: 859141059ac950e1e8cd042c66f842f26b9e3a62a1669a69fe6ba180cb58bbdf
+      CCACHE_BIN_DIR: 'C:\ccache_bin'
+      CCACHE_DIR: 'C:\ccache'
+      CCACHE_INODECACHE: "true"
+      CCACHE_SLOPPINESS: time_macros
+      CCACHE_MAXSIZE: 7G
+      CCACHE_LAUNCH_ARGS: '-DCMAKE_C_COMPILER_LAUNCHER=C:\ccache_bin\ccache.exe -DCMAKE_CXX_COMPILER_LAUNCHER=C:\ccache_bin\ccache.exe'
+      DEPS_CACHE_DIR: ./dependency_cache
+      BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/staging/
+      SKIP_RPCS3_TEST: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Fetch source (full history, the build reads the version from git)"
+        run: git submodule update --init --recursive emulators/rpcs3
+      - uses: nuget/setup-nuget@v2
+      - name: Restore NuGet packages
+        working-directory: emulators/rpcs3
+        run: nuget restore rpcs3.sln
+      - name: Setup env
+        shell: pwsh
+        run: |
+          echo "QTDIR=C:\Qt\${{ env.QT_VER }}\${{ env.QT_VER_MSVC }}_64" >> $env:GITHUB_ENV
+          echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VER }}" >> $env:GITHUB_ENV
+      - name: Get cache keys
+        working-directory: emulators/rpcs3
+        run: .ci/get_keys-windows.sh
+      - name: Download and unpack dependencies
+        working-directory: emulators/rpcs3
+        run: |
+          .ci/setup-windows.sh
+          .ci/setup-windows-ci-vars.sh win64 msvc
+      - name: Export variables
+        shell: bash
+        working-directory: emulators/rpcs3
+        run: |
+          while IFS='=' read -r key val; do
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            echo "$key=$val" >> "$GITHUB_ENV"
+          done < .ci/ci-vars.env
+      - uses: microsoft/setup-msbuild@v2
+      - name: Compile RPCS3
+        working-directory: emulators/rpcs3
+        shell: pwsh
+        run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:CLToolPath=${{ env.CCACHE_BIN_DIR }} /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\emulators\rpcs3\buildfiles\msvc\ci_only.targets"
+      - name: Collect
+        shell: bash
+        working-directory: emulators/rpcs3
+        run: |
+          rm -f bin/rpcs3.exp bin/rpcs3.lib bin/rpcs3.pdb bin/vc_redist.x64.exe
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp -r bin/. "$GITHUB_WORKSPACE/out/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-rpcs3
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ PCSX2 (PS2)
+  pcsx2:
+    runs-on: windows-2025-vs2026
+    continue-on-error: true
+    timeout-minutes: 300
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source
+        run: git submodule update --init --recursive --depth 1 emulators/pcsx2
+      - name: Configure MSBuild Clang version
+        shell: pwsh
+        working-directory: emulators/pcsx2
+        run: |
+          [string[]] $clang_cl = &clang-cl.exe --version
+          $version = [Regex]::Match($clang_cl[0], "(\d+\.\d+\.\d+)")
+          $path = $clang_cl[3].TrimStart("InstalledDir: ").TrimEnd("\bin")
+          @"
+          <Project>
+            <PropertyGroup>
+              <LLVMInstallDir>$path</LLVMInstallDir>
+              <LLVMToolsVersion>$version</LLVMToolsVersion>
+            </PropertyGroup>
+          </Project>
+          "@ | Out-File Directory.build.props
+      - uses: microsoft/setup-msbuild@v2
+      - name: Download patches
+        working-directory: emulators/pcsx2/bin/resources
+        run: aria2c -Z "https://github.com/PCSX2/pcsx2_patches/releases/latest/download/patches.zip"
+      - name: Cache dependencies
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: emulators/pcsx2/deps
+          key: pcsx2-deps-${{ hashFiles('emulators/pcsx2/.github/workflows/scripts/windows/build-dependencies.bat', 'emulators/pcsx2/.github/workflows/scripts/common/*.patch') }}
+      - name: Build dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        working-directory: emulators/pcsx2
+        env:
+          DEBUG: "0"
+        run: .github/workflows/scripts/windows/build-dependencies.bat
+      - name: Build PCSX2
+        working-directory: emulators/pcsx2
+        shell: cmd
+        run: |
+          msbuild "PCSX2_qt.slnx" /m /v:m /p:Configuration="Release AVX2" /p:Platform=x64 || exit /b
+          del bin\resources\fonts\Twemoji*
+      - name: Collect
+        shell: bash
+        working-directory: emulators/pcsx2
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp -r bin/. "$GITHUB_WORKSPACE/out/"
+          find "$GITHUB_WORKSPACE/out" \( -name '*.pdb' -o -name '*.lib' -o -name '*.exp' -o -name '*.ilk' -o -name '*.iobj' -o -name '*.ipdb' -o -name '*.bsc' \) -delete
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-pcsx2
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ DuckStation (PS1)
+  duckstation:
+    runs-on: windows-2025-vs2026
+    continue-on-error: true
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Fetch source (full history, the version stamp uses git)"
+        run: git submodule update --init --recursive emulators/duckstation-ps1
+      - name: Download dependencies
+        shell: bash
+        working-directory: emulators/duckstation-ps1
+        run: |
+          DEPS_VERSION=$(cat dep/PREBUILT-VERSION)
+          curl --fail --retry 5 --retry-all-errors -LO "https://github.com/duckstation/dependencies/releases/download/$DEPS_VERSION/deps-windows-qt-installer-x64.7z"
+          sha256sum --check --ignore-missing dep/PREBUILT-SHA256SUMS
+          7z x -odep/prebuilt deps-windows-qt-installer-x64.7z
+          rm deps-windows-qt-installer-x64.7z
+      - name: Download cheat and patch archives
+        shell: bash
+        working-directory: emulators/duckstation-ps1/data/resources
+        run: |
+          curl --retry 5 --retry-all-errors -LO "https://github.com/duckstation/chtdb/releases/download/latest/cheats.zip"
+          curl --retry 5 --retry-all-errors -LO "https://github.com/duckstation/chtdb/releases/download/latest/patches.zip"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build
+        working-directory: emulators/duckstation-ps1
+        shell: cmd
+        run: msbuild duckstation.sln -t:Build -p:Platform=x64;Configuration=ReleaseLTCG-Clang
+      - name: Collect
+        shell: bash
+        working-directory: emulators/duckstation-ps1
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp -r bin/x64/. "$GITHUB_WORKSPACE/out/"
+          find "$GITHUB_WORKSPACE/out" \( -name '*.pdb' -o -name '*.exp' -o -name '*.lib' -o -name '*.iobj' -o -name '*.ipdb' -o -name 'common-tests*' \) -delete
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-duckstation
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Dolphin (GameCube / Wii)
+  dolphin:
+    runs-on: windows-2022
+    continue-on-error: true
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source
+        run: git submodule update --init --recursive --depth 1 emulators/dolphin-wii
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.7.*
+          arch: win64_msvc2019_64
+          cache: true
+      - name: Configure
+        shell: cmd
+        run: >
+          cmake -S emulators/dolphin-wii -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="%QT_ROOT_DIR%"
+          -DENABLE_QT=ON -DENABLE_TESTS=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p out
+          cp -r build/Binaries/. out/
+          windeployqt --release --no-translations out/Dolphin.exe || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-dolphin
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Suyu (Switch)
+  suyu:
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source
+        shell: bash
+        run: |
+          git submodule update --init --depth 1 emulators/suyu-v0.0.4-nintendo
+          cd emulators/suyu-v0.0.4-nintendo
+          git -c submodule."externals/ownfoil".update=none -c submodule."externals/nxdumptool".update=none -c submodule."externals/nxapi".update=none -c submodule."externals/nx-optimizer".update=none submodule update --init --recursive --depth=1
+          f="externals/dynarmic/externals/mcl/include/boost/variant.hpp"
+          if [ -f "$f" ] && grep -q 'C:/Users' "$f"; then
+            printf '// Forwarding header\n#include <boost/variant/variant.hpp>\n#include <boost/variant/recursive_variant.hpp>\n#include <boost/variant/recursive_wrapper.hpp>\n#include <boost/variant/get.hpp>\n#include <boost/variant/apply_visitor.hpp>\n#include <boost/variant/static_visitor.hpp>\n#include <boost/variant/visitor_ptr.hpp>\n' > "$f"
+          fi
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.0"
+          arch: win64_msvc2019_64
+          modules: qtcharts qtmultimedia qtwebengine
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $sdkDir = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          echo "VULKAN_SDK=$($sdkDir.FullName)" >> $env:GITHUB_ENV
+          echo "$($sdkDir.FullName)\Bin" >> $env:GITHUB_PATH
+      - name: Configure
+        shell: bash
+        working-directory: emulators/suyu-v0.0.4-nintendo
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF -GNinja
+      - name: Build
+        working-directory: emulators/suyu-v0.0.4-nintendo
+        run: cmake --build build --target suyu suyu-cmd -j4
+      - name: Package
+        shell: pwsh
+        working-directory: emulators/suyu-v0.0.4-nintendo
+        run: |
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/out"
+          Copy-Item build/bin/suyu.exe "$env:GITHUB_WORKSPACE/out/"
+          Copy-Item build/bin/suyu-cmd.exe "$env:GITHUB_WORKSPACE/out/"
+          windeployqt --release --no-translations "$env:GITHUB_WORKSPACE/out/suyu.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-suyu
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Xenia (Xbox 360)
+  xenia:
+    runs-on: windows-2022
+    continue-on-error: true
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch source
+        run: git submodule update --init --recursive --depth 1 emulators/xenia-xbox
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Setup and build
+        working-directory: emulators/xenia-xbox
+        shell: cmd
+        run: |
+          call xb setup || exit /b
+          call xb build --config=release || exit /b
+      - name: Collect
+        shell: bash
+        working-directory: emulators/xenia-xbox
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp build/bin/Windows/Release/xenia.exe "$GITHUB_WORKSPACE/out/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emu-xenia
+          path: out/
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ one package
+  package:
+    needs: [launcher, shadps4, kyty, rpcs3, pcsx2, duckstation, dolphin, suyu, xenia]
+    if: ${{ !cancelled() && needs.launcher.result == 'success' }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: launcher
+          path: EmuLauncher
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: emu-*
+          path: downloaded
+
+      - name: Assemble
+        shell: bash
+        run: |
+          # artifact "emu-<Dir>" -> EmuLauncher/emulators/<Dir>
+          mkdir -p EmuLauncher/emulators
+          : > BUILD-REPORT.txt
+          for name in shadPS4 kyty rpcs3 pcsx2 duckstation dolphin suyu xenia; do
+            src="downloaded/emu-$name"
+            if [ -d "$src" ]; then
+              mkdir -p "EmuLauncher/emulators/$name"
+              cp -r "$src/." "EmuLauncher/emulators/$name/"
+              echo "OK       $name" >> BUILD-REPORT.txt
+            else
+              echo "MISSING  $name (its build job failed, see the Actions log)" >> BUILD-REPORT.txt
+            fi
+          done
+          cp BUILD-REPORT.txt EmuLauncher/
+          cat BUILD-REPORT.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EmuLauncher-windows
+          path: EmuLauncher/
+          compression-level: 6
+          if-no-files-found: error
+
+      - name: Zip for release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: Compress-Archive -Path EmuLauncher -DestinationPath EmuLauncher-windows.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EmuLauncher-windows.zip

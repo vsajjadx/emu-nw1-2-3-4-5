@@ -1,0 +1,24 @@
+[submodule "emulators/shadPS4"]
+	path = emulators/shadPS4
+	url = https://github.com/vsajjadx/shadPS4.git
+[submodule "emulators/pcsx2"]
+	path = emulators/pcsx2
+	url = https://github.com/vsajjadx/pcsx2.git
+[submodule "emulators/dolphin-wii"]
+	path = emulators/dolphin-wii
+	url = https://github.com/vsajjadx/dolphin-wii.git
+[submodule "emulators/duckstation-ps1"]
+	path = emulators/duckstation-ps1
+	url = https://github.com/vsajjadx/duckstation-ps1.git
+[submodule "emulators/KytyPS5"]
+	path = emulators/KytyPS5
+	url = https://github.com/vsajjadx/KytyPS5.git
+[submodule "emulators/rpcs3"]
+	path = emulators/rpcs3
+	url = https://github.com/vsajjadx/rpcs3.git
+[submodule "emulators/suyu-v0.0.4-nintendo"]
+	path = emulators/suyu-v0.0.4-nintendo
+	url = https://github.com/vsajjadx/suyu-v0.0.4-nintendo.git
+[submodule "emulators/xenia-xbox"]
+	path = emulators/xenia-xbox
+	url = https://github.com/vsajjadx/xenia-xbox.git

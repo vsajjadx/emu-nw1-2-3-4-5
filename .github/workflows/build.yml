@@ -14,6 +14,11 @@ on:
     branches: [main]
     paths-ignore: ["**.md"]
   workflow_dispatch:
+    inputs:
+      update_submodules:
+        description: "Update all emulator submodules to the latest commit from your forks before building"
+        type: boolean
+        default: false
 
 permissions:
   contents: write # only used to attach the package to a release on tags
@@ -23,8 +28,32 @@ env:
   GIT_TERMINAL_PROMPT: "0"
 
 jobs:
+  # ------------------------------------------------------------------ update submodules from your forks
+  update-submodules:
+    if: github.event_name == 'workflow_dispatch' && inputs.update_submodules == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Update submodules to latest commit on each fork's default branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for p in emulators/shadPS4 emulators/pcsx2 emulators/dolphin-wii emulators/duckstation-ps1 emulators/KytyPS5 emulators/rpcs3 emulators/suyu-v0.0.4-nintendo emulators/xenia-xbox; do
+            git submodule update --init --remote "$p"
+          done
+          git add emulators/
+          if git diff --cached --quiet; then
+            echo "Already up to date, nothing to commit."
+          else
+            git commit -m "chore: update submodules to latest from forks"
+            git push
+          fi
+
   # ------------------------------------------------------------------ launcher
   launcher:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -59,22 +88,13 @@ jobs:
 
   # ------------------------------------------------------------------ shadPS4 (PS4)
   shadps4:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2025-vs2026
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Fetch source
-        shell: bash
-        run: |
-          for i in 1 2 3 4 5; do
-            if git submodule update --init --recursive --depth 1 emulators/shadPS4; then
-              exit 0
-            fi
-            echo "::warning::shadPS4 attempt $i failed, retrying in 20s"
-            sleep 20
-          done
-          echo "Falling back to full (non-shallow) submodule fetch."
-          git submodule update --init --recursive emulators/shadPS4
+        run: git submodule update --init --recursive --depth 1 emulators/shadPS4
       - uses: egor-tensin/vs-shell@v2
         with:
           arch: x64
@@ -99,6 +119,7 @@ jobs:
 
   # ------------------------------------------------------------------ Kyty (PS5)
   kyty:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2022
     continue-on-error: true
     steps:
@@ -143,6 +164,7 @@ jobs:
 
   # ------------------------------------------------------------------ RPCS3 (PS3)
   rpcs3:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2025-vs2026
     continue-on-error: true
     timeout-minutes: 240
@@ -178,13 +200,8 @@ jobs:
         run: |
           echo "QTDIR=C:\Qt\${{ env.QT_VER }}\${{ env.QT_VER_MSVC }}_64" >> $env:GITHUB_ENV
           echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VER }}" >> $env:GITHUB_ENV
-      # The .ci scripts use `#!/bin/sh -ex` and `#!/bin/bash` syntax. Without
-      # `shell: bash` Windows defaults to PowerShell which silently can't run
-      # them — that was why .ci/ci-vars.env was never created and the next step
-      # failed with "No such file or directory".
       - name: Get cache keys
         working-directory: emulators/rpcs3
-        shell: bash
         run: .ci/get_keys-windows.sh
       - name: Download and unpack dependencies
         working-directory: emulators/rpcs3
@@ -220,6 +237,7 @@ jobs:
 
   # ------------------------------------------------------------------ PCSX2 (PS2)
   pcsx2:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2025-vs2026
     continue-on-error: true
     timeout-minutes: 300
@@ -281,6 +299,7 @@ jobs:
 
   # ------------------------------------------------------------------ DuckStation (PS1)
   duckstation:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2025-vs2026
     continue-on-error: true
     timeout-minutes: 240
@@ -325,7 +344,7 @@ jobs:
 
   # ------------------------------------------------------------------ Dolphin (GameCube / Wii)
   dolphin:
-    # Dolphin requires MSVC 19.50+ (VS 2026); windows-2022 only ships VS 2022.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2025-vs2026
     continue-on-error: true
     timeout-minutes: 240
@@ -336,8 +355,8 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - uses: jurplel/install-qt-action@v4
         with:
-          version: "6.7.0"
-          arch: win64_msvc2022_64
+          version: 6.7.*
+          arch: win64_msvc2019_64
           cache: true
       - name: Configure
         shell: cmd
@@ -362,6 +381,7 @@ jobs:
 
   # ------------------------------------------------------------------ Suyu (Switch)
   suyu:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-latest
     continue-on-error: true
     timeout-minutes: 300
@@ -393,10 +413,7 @@ jobs:
       - name: Configure
         shell: bash
         working-directory: emulators/suyu-v0.0.4-nintendo
-        # Use the prebuilt (bundled) Sirit tarball: the GitHub release that
-        # CPM tries to download (eden-emulator/sirit v1.0.5) returns HTTP 22 /
-        # an empty body which CMake's file(DOWNLOAD ...) can't hash.
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF -DYUZU_USE_BUNDLED_SIRIT=ON -GNinja
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF -GNinja
       - name: Build
         working-directory: emulators/suyu-v0.0.4-nintendo
         run: cmake --build build --target suyu suyu-cmd -j4
@@ -416,6 +433,7 @@ jobs:
 
   # ------------------------------------------------------------------ Xenia (Xbox 360)
   xenia:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.update_submodules == true) }}
     runs-on: windows-2022
     continue-on-error: true
     timeout-minutes: 240
@@ -427,12 +445,9 @@ jobs:
       - name: Setup and build
         working-directory: emulators/xenia-xbox
         shell: cmd
-        # xb with str.lower, --config رو پایین میاره و MSBuild رو با "release|x64" صدا می‌زنه
-        # که premake اون رو با حالت "Release" تولید نکرده. مستقیم msbuild می‌زنیم
-        # تا case درست (Release|x64) به MSBuild برسد.
         run: |
           call xb setup || exit /b
-          msbuild build\xenia.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal /t:Build || exit /b
+          call xb build --config=release -- /p:Configuration=Release || exit /b
       - name: Collect
         shell: bash
         working-directory: emulators/xenia-xbox
@@ -497,3 +512,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: EmuLauncher-windows.zip
+
